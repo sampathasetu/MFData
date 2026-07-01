@@ -14,7 +14,7 @@ async function fetchAMFIData() {
   const lines = text.split('\n')
   console.log(`Total lines: ${lines.length}`)
 
-  // Detect separator: try ';', then '|', then tab
+  // Detect separator
   let separator = ';'
   for (const line of lines) {
     if (line.trim()) {
@@ -27,32 +27,56 @@ async function fetchAMFIData() {
 
   const schemes = []
   let headerSkipped = false
+  let processedLines = 0
+  let sampleCount = 0
+
   for (const line of lines) {
     if (!line.trim()) continue
     const parts = line.split(separator)
-    if (parts.length < 5) continue
-
-    // Skip header row if first field is not numeric
-    if (!headerSkipped && isNaN(parseInt(parts[0].trim()))) {
-      headerSkipped = true
+    if (parts.length < 5) {
+      console.warn(`Line has <5 parts: "${line}"`)
       continue
     }
 
-    const schemeCode = parts[0].trim()
-    const schemeName = parts[2].trim()
-    const nav = parts[3].trim()
-    const date = parts[4].trim()
-
-    // Convert date from DD-MM-YYYY to YYYY-MM-DD
-    const dateParts = date.split('-')
-    if (dateParts.length === 3) {
-      const day = dateParts[0].padStart(2, '0')
-      const month = dateParts[1].padStart(2, '0')
-      const year = dateParts[2]
-      const formattedDate = `${year}-${month}-${day}`
-      schemes.push({ schemeCode, schemeName, nav, date: formattedDate })
+    // Show first 3 non‑header lines
+    if (sampleCount < 3 && !headerSkipped) {
+      console.log(`Sample line: "${line}"`)
+      console.log(`  Parts: ${parts.length}, first: "${parts[0]}", second: "${parts[1]}", third: "${parts[2]}"`)
+      sampleCount++
     }
+
+    // Skip header row (if first field is not numeric)
+    if (!headerSkipped && isNaN(parseInt(parts[0].trim()))) {
+      headerSkipped = true
+      console.log(`Header skipped: "${line}"`)
+      continue
+    }
+
+    // Now process data lines
+    const schemeCode = parts[0].trim()
+    const schemeName = parts[2].trim()   // Usually field index 2
+    const nav = parts[3].trim()          // NAV
+    const date = parts[4].trim()         // Date
+
+    // Validate NAV and date
+    if (isNaN(parseFloat(nav))) {
+      console.warn(`Invalid NAV: "${nav}" for scheme ${schemeCode}`)
+      continue
+    }
+    const dateParts = date.split('-')
+    if (dateParts.length !== 3) {
+      console.warn(`Invalid date: "${date}" for scheme ${schemeCode}`)
+      continue
+    }
+    const day = dateParts[0].padStart(2, '0')
+    const month = dateParts[1].padStart(2, '0')
+    const year = dateParts[2]
+    const formattedDate = `${year}-${month}-${day}`
+    schemes.push({ schemeCode, schemeName, nav, date: formattedDate })
+    processedLines++
   }
+
+  console.log(`Processed ${processedLines} data lines`)
   console.log(`Parsed ${schemes.length} schemes`)
   return schemes
 }
