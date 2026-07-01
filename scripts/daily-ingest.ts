@@ -5,6 +5,7 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 )
 
+// Helper to parse AMFI date format (DD-MMM-YYYY)
 function parseDate(dateStr: string): string {
   const parts = dateStr.split('-')
   if (parts.length !== 3) throw new Error(`Invalid date: ${dateStr}`)
@@ -17,14 +18,14 @@ function parseDate(dateStr: string): string {
     'sep': '09', 'oct': '10', 'nov': '11', 'dec': '12'
   }
   if (monthMap[month]) month = monthMap[month]
-  else if (month.length === 2) { /* already numeric */ }
+  else if (month.length === 2) { /* numeric month */ }
   else throw new Error(`Unknown month: ${month}`)
   return `${year}-${month}-${day}`
 }
 
 async function fetchAMFIData() {
   const url = 'https://www.amfiindia.com/spages/NAVAll.txt'
-  console.log('Fetching AMFI data from official source...')
+  console.log('Fetching AMFI data...')
   const res = await fetch(url)
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   const text = await res.text()
@@ -46,11 +47,10 @@ async function fetchAMFIData() {
     const nav = parts[4]?.trim()
     const dateRaw = parts[5]?.trim()
     if (!nav || !dateRaw) continue
-    const navNum = parseFloat(nav)
-    if (isNaN(navNum)) continue
+    if (isNaN(parseFloat(nav))) continue
     try {
       const formattedDate = parseDate(dateRaw)
-      schemes.push({ schemeCode: code, schemeName: name, nav: String(navNum), date: formattedDate })
+      schemes.push({ schemeCode: code, schemeName: name, nav: parseFloat(nav), date: formattedDate })
     } catch (err) {
       // skip invalid dates
     }
@@ -61,26 +61,30 @@ async function fetchAMFIData() {
 
 async function ingest() {
   try {
-    // 1. Fetch all mappings from Supabase into a Map
+    // 1. Fetch **all** mappings with a high limit
     console.log('Fetching mapping table...')
-    const { data: mappings, error: mapError } = await supabase
+    const { data: mappings, error: mapError, count } = await supabase
       .from('amfi_mapping')
-      .select('amfi_code, scheme_plan_id')
+      .select('amfi_code, scheme_plan_id', { count: 'exact' })
+      .limit(20000) // ensure we get all rows
+
     if (mapError) {
       console.error('Error fetching mapping:', mapError)
       process.exit(1)
     }
+
+    console.log(`Loaded ${mappings?.length || 0} mappings (total count: ${count})`)
+
     const mappingMap = new Map<string, string>()
     for (const row of mappings || []) {
       mappingMap.set(row.amfi_code, row.scheme_plan_id)
     }
-    console.log(`Loaded ${mappingMap.size} mappings`)
 
-    // 2. Fetch and parse AMFI data
+    // 2. Fetch AMFI data
     const schemes = await fetchAMFIData()
     console.log(`Fetched ${schemes.length} schemes`)
 
-    // 3. Build payload using the Map (no per‑scheme DB queries)
+    // 3. Build payload using the Map
     const payload = []
     for (const scheme of schemes) {
       const planId = mappingMap.get(scheme.schemeCode)
@@ -88,7 +92,7 @@ async function ingest() {
         payload.push({
           scheme_plan_id: planId,
           nav_date: scheme.date,
-          nav_value: parseFloat(scheme.nav)
+          nav_value: scheme.nav
         })
       }
     }
@@ -98,16 +102,24 @@ async function ingest() {
       return
     }
 
-    // 4. Upsert all in one go
-    const { error } = await supabase
-      .from('nav_history')
-      .upsert(payload, { onConflict: 'scheme_plan_id, nav_date' })
-
-    if (error) {
-      console.error('Upsert error:', error)
-      process.exit(1)
+    // 4. Upsert in batches of 1000 (to avoid request size limits)
+    console.log(`Upserting ${payload.length} NAV records in batches...`)
+    const batchSize = 1000
+    let upserted = 0
+    for (let i = 0; i < payload.length; i += batchSize) {
+      const batch = payload.slice(i, i + batchSize)
+      const { error } = await supabase
+        .from('nav_history')
+        .upsert(batch, { onConflict: 'scheme_plan_id, nav_date' })
+      if (error) {
+        console.error('Upsert error:', error)
+        process.exit(1)
+      }
+      upserted += batch.length
+      console.log(`Upserted ${upserted} / ${payload.length} records`)
     }
-    console.log(`Successfully upserted ${payload.length} NAV records`)
+
+    console.log(`✅ Successfully upserted ${payload.length} NAV records`)
   } catch (err) {
     console.error('Error during ingestion:', err)
     process.exit(1)
