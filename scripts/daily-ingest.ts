@@ -5,40 +5,32 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 )
 
-function parseDate(dateStr: string): string {
-  const parts = dateStr.split('-')
-  if (parts.length !== 3) {
-    throw new Error(`Invalid date format: ${dateStr}`)
-  }
-  const day = parts[0].padStart(2, '0')
-  let month = parts[1].toLowerCase()
-  let year = parts[2]
-
-  const monthMap: Record<string, string> = {
-    'jan': '01', 'feb': '02', 'mar': '03', 'apr': '04',
-    'may': '05', 'jun': '06', 'jul': '07', 'aug': '08',
-    'sep': '09', 'oct': '10', 'nov': '11', 'dec': '12'
-  }
-
-  if (monthMap[month]) {
-    month = monthMap[month]
-  } else if (month.length !== 2) {
-    throw new Error(`Invalid month format: ${month}`)
-  }
-
-  if (year.length === 2) {
-    const fullYear = parseInt(year)
-    year = fullYear >= 70 ? `19${year}` : `20${year}`
-  }
-
-  return `${year}-${month}-${day}`
-}
-
 async function fetchAMFIData() {
-  console.log('Fetching AMFI data...')
-  const res = await fetch('https://api.mfapi.in/mf')
-  if (!res.ok) throw new Error(`API error: ${res.status}`)
-  return res.json()
+  const url = 'https://www.amfiindia.com/spages/NAVAll.txt'
+  console.log('Fetching AMFI data from official source...')
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  const text = await res.text()
+  const lines = text.split('\n')
+  const schemes = []
+  for (const line of lines) {
+    if (!line.trim() || line.startsWith('Scheme Code')) continue
+    const parts = line.split(';')
+    if (parts.length < 5) continue
+    const schemeCode = parts[0].trim()
+    const schemeName = parts[2].trim()
+    const nav = parts[3].trim()
+    const date = parts[4].trim()
+    const dateParts = date.split('-')
+    if (dateParts.length === 3) {
+      const day = dateParts[0].padStart(2, '0')
+      const month = dateParts[1].padStart(2, '0')
+      const year = dateParts[2]
+      const formattedDate = `${year}-${month}-${day}`
+      schemes.push({ schemeCode, schemeName, nav, date: formattedDate })
+    }
+  }
+  return schemes
 }
 
 async function getPlanId(amfiCode: string): Promise<string | null> {
@@ -63,13 +55,13 @@ async function ingest() {
     for (const scheme of schemes) {
       const planId = await getPlanId(scheme.schemeCode)
       if (!planId) continue
-
       try {
-        const navDate = parseDate(scheme.date)
+        const navValue = parseFloat(scheme.nav)
+        if (isNaN(navValue)) continue
         payload.push({
           scheme_plan_id: planId,
-          nav_date: navDate,
-          nav_value: parseFloat(scheme.nav)
+          nav_date: scheme.date,
+          nav_value: navValue
         })
       } catch (err) {
         console.warn(`Skipping scheme ${scheme.schemeCode}: ${err}`)
