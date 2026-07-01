@@ -12,15 +12,38 @@ async function fetchAMFIData() {
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   const text = await res.text()
   const lines = text.split('\n')
-  const schemes = []
+  console.log(`Total lines: ${lines.length}`)
+
+  // Detect separator: try ';', then '|', then tab
+  let separator = ';'
   for (const line of lines) {
-    if (!line.trim() || line.startsWith('Scheme Code')) continue
-    const parts = line.split(';')
+    if (line.trim()) {
+      if (line.includes('|')) { separator = '|'; break }
+      if (line.includes('\t')) { separator = '\t'; break }
+      break
+    }
+  }
+  console.log(`Using separator: "${separator}"`)
+
+  const schemes = []
+  let headerSkipped = false
+  for (const line of lines) {
+    if (!line.trim()) continue
+    const parts = line.split(separator)
     if (parts.length < 5) continue
+
+    // Skip header row if first field is not numeric
+    if (!headerSkipped && isNaN(parseInt(parts[0].trim()))) {
+      headerSkipped = true
+      continue
+    }
+
     const schemeCode = parts[0].trim()
     const schemeName = parts[2].trim()
     const nav = parts[3].trim()
     const date = parts[4].trim()
+
+    // Convert date from DD-MM-YYYY to YYYY-MM-DD
     const dateParts = date.split('-')
     if (dateParts.length === 3) {
       const day = dateParts[0].padStart(2, '0')
@@ -30,6 +53,7 @@ async function fetchAMFIData() {
       schemes.push({ schemeCode, schemeName, nav, date: formattedDate })
     }
   }
+  console.log(`Parsed ${schemes.length} schemes`)
   return schemes
 }
 
