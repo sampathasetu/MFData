@@ -14,7 +14,13 @@ async function fetchAMFIData() {
   const lines = text.split('\n')
   console.log(`Total lines: ${lines.length}`)
 
-  // Detect separator
+  // Print first 10 raw lines
+  console.log('=== First 10 raw lines ===')
+  for (let i = 0; i < Math.min(10, lines.length); i++) {
+    console.log(`Line ${i+1}: "${lines[i]}"`)
+  }
+
+  // Auto-detect separator
   let separator = ';'
   for (const line of lines) {
     if (line.trim()) {
@@ -25,25 +31,20 @@ async function fetchAMFIData() {
   }
   console.log(`Using separator: "${separator}"`)
 
+  // Parse with detected separator and print first few lines with parts
   const schemes = []
   let headerSkipped = false
-  let processedLines = 0
   let sampleCount = 0
 
   for (const line of lines) {
     if (!line.trim()) continue
     const parts = line.split(separator)
-    if (parts.length < 5) {
-      console.warn(`Line has <5 parts: "${line}"`)
-      continue
-    }
-
-    // Show first 3 non‑header lines
-    if (sampleCount < 3 && !headerSkipped) {
-      console.log(`Sample line: "${line}"`)
-      console.log(`  Parts: ${parts.length}, first: "${parts[0]}", second: "${parts[1]}", third: "${parts[2]}"`)
+    // Print first 5 data lines with parts
+    if (sampleCount < 5 && !headerSkipped) {
+      console.log(`Sample line parts (${parts.length}):`, parts)
       sampleCount++
     }
+    if (parts.length < 5) continue
 
     // Skip header row (if first field is not numeric)
     if (!headerSkipped && isNaN(parseInt(parts[0].trim()))) {
@@ -52,20 +53,25 @@ async function fetchAMFIData() {
       continue
     }
 
-    // Now process data lines
-    const schemeCode = parts[0].trim()
-    const schemeName = parts[2].trim()   // Usually field index 2
-    const nav = parts[3].trim()          // NAV
-    const date = parts[4].trim()         // Date
-
-    // Validate NAV and date
-    if (isNaN(parseFloat(nav))) {
-      console.warn(`Invalid NAV: "${nav}" for scheme ${schemeCode}`)
+    // Now we assume standard format: Code;ISIN;Name;NAV;Date;...
+    // But we need to find which field is numeric NAV and which is date.
+    // We'll look for a field that contains a date (DD-MM-YYYY) and a numeric NAV.
+    const possibleNavIndex = parts.findIndex(p => !isNaN(parseFloat(p.trim())) && p.trim() !== '')
+    const possibleDateIndex = parts.findIndex(p => /^\d{2}-\d{2}-\d{4}$/.test(p.trim()))
+    
+    if (possibleNavIndex === -1 || possibleDateIndex === -1) {
+      console.warn(`Could not find NAV or date in line: "${line}"`)
       continue
     }
+
+    const schemeCode = parts[0].trim()
+    const schemeName = parts[2]?.trim() || 'Unknown'
+    const nav = parts[possibleNavIndex].trim()
+    const date = parts[possibleDateIndex].trim()
+
     const dateParts = date.split('-')
     if (dateParts.length !== 3) {
-      console.warn(`Invalid date: "${date}" for scheme ${schemeCode}`)
+      console.warn(`Invalid date format: "${date}"`)
       continue
     }
     const day = dateParts[0].padStart(2, '0')
@@ -73,10 +79,8 @@ async function fetchAMFIData() {
     const year = dateParts[2]
     const formattedDate = `${year}-${month}-${day}`
     schemes.push({ schemeCode, schemeName, nav, date: formattedDate })
-    processedLines++
   }
 
-  console.log(`Processed ${processedLines} data lines`)
   console.log(`Parsed ${schemes.length} schemes`)
   return schemes
 }
