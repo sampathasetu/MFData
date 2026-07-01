@@ -5,7 +5,6 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 )
 
-// Helper to parse AMFI date format (DD-MMM-YYYY)
 function parseDate(dateStr: string): string {
   const parts = dateStr.split('-')
   if (parts.length !== 3) throw new Error(`Invalid date: ${dateStr}`)
@@ -18,9 +17,49 @@ function parseDate(dateStr: string): string {
     'sep': '09', 'oct': '10', 'nov': '11', 'dec': '12'
   }
   if (monthMap[month]) month = monthMap[month]
-  else if (month.length === 2) { /* numeric month */ }
+  else if (month.length === 2) { /* numeric */ }
   else throw new Error(`Unknown month: ${month}`)
   return `${year}-${month}-${day}`
+}
+
+async function fetchAllMappings(): Promise<Map<string, string>> {
+  const mappingMap = new Map<string, string>()
+  let offset = 0
+  const pageSize = 1000
+  let hasMore = true
+
+  console.log('Fetching all mappings with reliable pagination...')
+
+  while (hasMore) {
+    const { data, error } = await supabase
+      .from('amfi_mapping')
+      .select('amfi_code, scheme_plan_id')
+      .order('amfi_code', { ascending: true })
+      .range(offset, offset + pageSize - 1)
+
+    if (error) {
+      console.error('Error fetching mappings:', error)
+      process.exit(1)
+    }
+
+    if (!data || data.length === 0) {
+      hasMore = false
+      break
+    }
+
+    for (const row of data) {
+      mappingMap.set(row.amfi_code, row.scheme_plan_id)
+    }
+
+    console.log(`Fetched ${mappingMap.size} mappings so far...`)
+    offset += pageSize
+
+    // If we got fewer rows than pageSize, we've reached the end
+    if (data.length < pageSize) hasMore = false
+  }
+
+  console.log(`✅ Loaded ${mappingMap.size} mappings total`)
+  return mappingMap
 }
 
 async function fetchAMFIData() {
@@ -61,30 +100,10 @@ async function fetchAMFIData() {
 
 async function ingest() {
   try {
-    // 1. Fetch **all** mappings with a high limit
-    console.log('Fetching mapping table...')
-    const { data: mappings, error: mapError, count } = await supabase
-      .from('amfi_mapping')
-      .select('amfi_code, scheme_plan_id', { count: 'exact' })
-      .limit(20000) // ensure we get all rows
-
-    if (mapError) {
-      console.error('Error fetching mapping:', mapError)
-      process.exit(1)
-    }
-
-    console.log(`Loaded ${mappings?.length || 0} mappings (total count: ${count})`)
-
-    const mappingMap = new Map<string, string>()
-    for (const row of mappings || []) {
-      mappingMap.set(row.amfi_code, row.scheme_plan_id)
-    }
-
-    // 2. Fetch AMFI data
+    const mappingMap = await fetchAllMappings()
     const schemes = await fetchAMFIData()
     console.log(`Fetched ${schemes.length} schemes`)
 
-    // 3. Build payload using the Map
     const payload = []
     for (const scheme of schemes) {
       const planId = mappingMap.get(scheme.schemeCode)
@@ -102,7 +121,6 @@ async function ingest() {
       return
     }
 
-    // 4. Upsert in batches of 1000 (to avoid request size limits)
     console.log(`Upserting ${payload.length} NAV records in batches...`)
     const batchSize = 1000
     let upserted = 0
@@ -116,7 +134,7 @@ async function ingest() {
         process.exit(1)
       }
       upserted += batch.length
-      console.log(`Upserted ${upserted} / ${payload.length} records`)
+      console.log(`Upserted ${upserted} / ${payload.length}`)
     }
 
     console.log(`✅ Successfully upserted ${payload.length} NAV records`)
