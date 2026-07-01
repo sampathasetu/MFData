@@ -6,31 +6,19 @@ const supabase = createClient(
 )
 
 function parseDate(dateStr: string): string {
-  // Handle formats like "30-Jun-2026" or "30-06-2026"
   const parts = dateStr.split('-')
-  if (parts.length !== 3) {
-    throw new Error(`Invalid date format: ${dateStr}`)
-  }
+  if (parts.length !== 3) throw new Error(`Invalid date: ${dateStr}`)
   const day = parts[0].padStart(2, '0')
   let month = parts[1].toLowerCase()
   const year = parts[2]
-
-  // Convert month abbreviation to numeric
   const monthMap: Record<string, string> = {
     'jan': '01', 'feb': '02', 'mar': '03', 'apr': '04',
     'may': '05', 'jun': '06', 'jul': '07', 'aug': '08',
     'sep': '09', 'oct': '10', 'nov': '11', 'dec': '12'
   }
-
-  if (monthMap[month]) {
-    month = monthMap[month]
-  } else if (month.length === 2) {
-    // Already numeric month
-    month = month
-  } else {
-    throw new Error(`Unknown month: ${month}`)
-  }
-
+  if (monthMap[month]) month = monthMap[month]
+  else if (month.length === 2) { /* already numeric */ }
+  else throw new Error(`Unknown month: ${month}`)
   return `${year}-${month}-${day}`
 }
 
@@ -44,68 +32,64 @@ async function fetchAMFIData() {
   console.log(`Total lines: ${lines.length}`)
 
   const schemes = []
+  let started = false
   for (const line of lines) {
     if (!line.trim()) continue
     const parts = line.split(';')
-    // We expect 6 fields: Code, ISIN1, ISIN2, Name, NAV, Date
     if (parts.length < 6) continue
-    // Skip header row
-    if (isNaN(parseInt(parts[0].trim()))) continue
-    // Skip lines that have "IDCW" or other non-standard? We'll trust the structure.
-    const schemeCode = parts[0].trim()
-    const schemeName = parts[3].trim()
-    const nav = parts[4].trim()
-    const date = parts[5].trim()
-
-    // Validate NAV
-    const navValue = parseFloat(nav)
-    if (isNaN(navValue)) continue
-
-    // Parse date
+    if (!started && isNaN(parseInt(parts[0].trim()))) {
+      started = true
+      continue
+    }
+    const code = parts[0].trim()
+    const name = parts[3]?.trim() || 'Unknown'
+    const nav = parts[4]?.trim()
+    const dateRaw = parts[5]?.trim()
+    if (!nav || !dateRaw) continue
+    const navNum = parseFloat(nav)
+    if (isNaN(navNum)) continue
     try {
-      const formattedDate = parseDate(date)
-      schemes.push({ schemeCode, schemeName, nav: nav, date: formattedDate })
+      const formattedDate = parseDate(dateRaw)
+      schemes.push({ schemeCode: code, schemeName: name, nav: String(navNum), date: formattedDate })
     } catch (err) {
-      console.warn(`Skipping scheme ${schemeCode}: invalid date "${date}"`)
+      // skip invalid dates
     }
   }
-
   console.log(`Parsed ${schemes.length} schemes`)
   return schemes
 }
 
-async function getPlanId(amfiCode: string): Promise<string | null> {
-  const { data, error } = await supabase
-    .from('amfi_mapping')
-    .select('scheme_plan_id')
-    .eq('amfi_code', amfiCode)
-    .maybeSingle()
-  if (error) {
-    console.warn(`Lookup error for ${amfiCode}:`, error.message)
-    return null
-  }
-  return data?.scheme_plan_id || null
-}
-
 async function ingest() {
   try {
+    // 1. Fetch all mappings from Supabase into a Map
+    console.log('Fetching mapping table...')
+    const { data: mappings, error: mapError } = await supabase
+      .from('amfi_mapping')
+      .select('amfi_code, scheme_plan_id')
+    if (mapError) {
+      console.error('Error fetching mapping:', mapError)
+      process.exit(1)
+    }
+    const mappingMap = new Map<string, string>()
+    for (const row of mappings || []) {
+      mappingMap.set(row.amfi_code, row.scheme_plan_id)
+    }
+    console.log(`Loaded ${mappingMap.size} mappings`)
+
+    // 2. Fetch and parse AMFI data
     const schemes = await fetchAMFIData()
     console.log(`Fetched ${schemes.length} schemes`)
 
+    // 3. Build payload using the Map (no per‑scheme DB queries)
     const payload = []
     for (const scheme of schemes) {
-      const planId = await getPlanId(scheme.schemeCode)
-      if (!planId) continue
-      try {
-        const navValue = parseFloat(scheme.nav)
-        if (isNaN(navValue)) continue
+      const planId = mappingMap.get(scheme.schemeCode)
+      if (planId) {
         payload.push({
           scheme_plan_id: planId,
           nav_date: scheme.date,
-          nav_value: navValue
+          nav_value: parseFloat(scheme.nav)
         })
-      } catch (err) {
-        console.warn(`Skipping scheme ${scheme.schemeCode}: ${err}`)
       }
     }
 
@@ -114,6 +98,7 @@ async function ingest() {
       return
     }
 
+    // 4. Upsert all in one go
     const { error } = await supabase
       .from('nav_history')
       .upsert(payload, { onConflict: 'scheme_plan_id, nav_date' })
